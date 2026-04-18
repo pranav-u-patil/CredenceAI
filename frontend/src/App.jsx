@@ -246,24 +246,51 @@ function App() {
   const [input, setInput]         = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult]       = useState(null);
+  const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 
   const isActive = isLoading || result !== null;
 
-  const handleSubmit = (query) => {
+  const handleSubmit = async (query) => {
+    const trimmedQuery = (query || "").trim();
+    if (!trimmedQuery) return;
+
     setResult(null);
     setIsLoading(true);
 
-    // ── Replace with real backend call ──────────────
-    // fetch("/api/analyze", { method: "POST", body: JSON.stringify({ query }) })
-    //   .then(r => r.json())
-    //   .then(d => { setResult(d.output); setIsLoading(false); });
-    setTimeout(() => {
-      setIsLoading(false);
+    try {
+      const payload = {
+        claim_id: `claim_${Date.now()}`,
+        claim_text: trimmedQuery,
+        timestamp: new Date().toISOString(),
+        initial_urls: [],
+        entities: [],
+        context: {},
+        source_meta: {},
+      };
+
+      const response = await fetch(`${API_BASE_URL}/ingest/scraper`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data?.detail || `Request failed with status ${response.status}`);
+      }
+
       setResult(
-        `Analysis for: "${query}"\n\nThis is a placeholder response. Connect your backend API here and replace this with real output from the intelligence engine.`
+        `Request accepted.\n\nClaim ID: ${data?.claim_id || payload.claim_id}\nStatus: ${data?.status || "accepted"}`
       );
       setInput("");
-    }, 2500);
+    } catch (error) {
+      setResult(`Backend connection failed:\n\n${error?.message || "Unknown error"}`);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleClosePanel = () => {
