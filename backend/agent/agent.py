@@ -17,18 +17,17 @@ import time
 import argparse
 from typing import Any
 
-from pipelines.multi_search     import run_multi_search
-from pipelines.social_sentiment import run_social_sentiment
-from pipelines.model_validation  import run_model_validation
-from pipelines.source_behavior   import run_source_behavior
-from scoring.aggregator          import aggregate_evidence
-from scoring.classifier          import classify_score
-from config.settings             import AgentSettings
-from utils.logger                import get_logger
-from utils.schema                import ClaimInput, AgentOutput, build_output
+from backend.agent.pipelines.multi_search     import run_multi_search
+from backend.agent.pipelines.social_sentiment import run_social_sentiment
+from backend.agent.pipelines.model_validation  import run_model_validation
+from backend.agent.pipelines.source_behavior   import run_source_behavior
+from backend.agent.scoring.aggregator          import aggregate_evidence
+from backend.agent.scoring.classifier          import classify_score
+from backend.agent.config.settings             import AgentSettings
+from backend.agent.utils.logger                import get_logger
+from backend.agent.utils.schema                import ClaimInput, AgentOutput, build_output
 
 logger = get_logger(__name__)
-
 
 async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None) -> dict[str, Any]:
     """
