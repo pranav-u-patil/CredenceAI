@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Routes, Route } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { Globe, ShieldCheck, Sparkles, X, LoaderCircle, FileText, Link2, CalendarDays, TriangleAlert } from "lucide-react";
 import { GridPattern } from "./components/ui/grid-pattern";
@@ -10,6 +11,8 @@ import {
 } from "./components/ui/prompt-input";
 import { Button } from "./components/ui/button";
 import { cn } from "./lib/utils";
+import { Header } from "./components/ui/header";
+import Finance from "./Pages/Finance.jsx";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -315,6 +318,7 @@ function App() {
 
   return (
     <div className="min-h-screen overflow-hidden bg-[#f6f0e8] text-stone-900">
+      <Header />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(245,158,11,0.18),_transparent_28%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.16),_transparent_32%),linear-gradient(180deg,_rgba(255,255,255,0.8),_rgba(246,240,232,0.95))]" />
 
       <GridPattern
@@ -330,10 +334,10 @@ function App() {
         transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
       >
         <div className={cn("w-full text-center transition-all duration-500", isActive ? "mb-8" : "mb-14")}>
-          <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-stone-300/80 bg-white/80 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-600 shadow-sm">
+          {/* <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-stone-300/80 bg-white/80 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-stone-600 shadow-sm">
             <Sparkles className="h-3.5 w-3.5 text-amber-600" />
             URL-first newsroom workflow
-          </div>
+          </div> */}
           <h1 className="mx-auto max-w-4xl font-serif text-5xl font-semibold tracking-tight text-stone-900 sm:text-6xl">
             Paste a news link, preview the story, then decide if it deserves deeper verification.
           </h1>
@@ -395,4 +399,13 @@ function App() {
   );
 }
 
-export default App;
+function AppRouter() {
+  return (
+    <Routes>
+      <Route path="/" element={<App />} />
+      <Route path="/finance" element={<Finance />} />
+    </Routes>
+  );
+}
+
+export default AppRouter;
