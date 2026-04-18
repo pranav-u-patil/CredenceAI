@@ -19,9 +19,26 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from config.settings import AgentSettings
-from utils.schema    import ClaimInput
-from utils.logger    import get_logger
+try:
+    from ..config.settings import AgentSettings
+except ImportError:
+    from config.settings import AgentSettings
+
+try:
+    from CredenceAI.backend.app.models.schema import ScraperInput as ClaimInput
+except ImportError:
+    try:
+        from ...app.models.schema import ScraperInput as ClaimInput
+    except ImportError:
+        from app.models.schema import ScraperInput as ClaimInput
+
+try:
+    from CredenceAI.backend.utils.log import get_logger
+except ImportError:
+    try:
+        from ...utils.log import get_logger
+    except ImportError:
+        from utils.log import get_logger
 
 logger = get_logger(__name__)
 

@@ -15,13 +15,36 @@ PLACEHOLDERS
 
 from __future__ import annotations
 import uuid
-from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-from config.settings import AgentSettings
-from utils.schema    import ClaimInput
-from utils.db        import get_source_history
-from utils.logger    import get_logger
+try:
+    from ..config.settings import AgentSettings
+except ImportError:
+    from config.settings import AgentSettings
+
+try:
+    from CredenceAI.backend.app.models.schema import ScraperInput as ClaimInput
+except ImportError:
+    try:
+        from ...app.models.schema import ScraperInput as ClaimInput
+    except ImportError:
+        from app.models.schema import ScraperInput as ClaimInput
+
+try:
+    from CredenceAI.backend.utils.db import get_source_history
+except ImportError:
+    try:
+        from ...utils.db import get_source_history
+    except ImportError:
+        from utils.db import get_source_history
+
+try:
+    from CredenceAI.backend.utils.log import get_logger
+except ImportError:
+    try:
+        from ...utils.log import get_logger
+    except ImportError:
+        from utils.log import get_logger
 
 logger = get_logger(__name__)
 
@@ -58,7 +81,7 @@ async def run_source_behavior(claim: ClaimInput, settings: AgentSettings) -> dic
         }
     """
     # Collect all domains from initial_urls
-    domains = list({urlparse(u.url).netloc for u in claim.initial_urls})
+    domains = list({urlparse(str(u.url)).netloc for u in claim.initial_urls})
     if not domains:
         return _empty_result()
 
