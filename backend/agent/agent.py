@@ -12,23 +12,136 @@ Usage:
 
 import asyncio
 import json
-import logging
 import time
 import argparse
-from typing import Any
+from importlib import import_module
+from typing import Any, Callable
 
-from pipelines.multi_search     import run_multi_search
-from pipelines.social_sentiment import run_social_sentiment
-from pipelines.model_validation  import run_model_validation
-from pipelines.source_behavior   import run_source_behavior
-from scoring.aggregator          import aggregate_evidence
-from scoring.classifier          import classify_score
-from config.settings             import AgentSettings
-from utils.logger                import get_logger
-from utils.schema                import ClaimInput, AgentOutput, build_output
+try:
+    from .config.settings import AgentSettings
+    from .scoring.aggregator import aggregate_evidence
+    from .scoring.classifier import classify_score
+except ImportError:
+    from config.settings import AgentSettings
+    from scoring.aggregator import aggregate_evidence
+    from scoring.classifier import classify_score
+
+try:
+    from CredenceAI.backend.app.models.schema import ScraperInput as ClaimInput
+except ImportError:
+    try:
+        from ..app.models.schema import ScraperInput as ClaimInput
+    except ImportError:
+        from app.models.schema import ScraperInput as ClaimInput
+
+try:
+    from CredenceAI.backend.utils.log import get_logger
+except ImportError:
+    try:
+        from ..utils.log import get_logger
+    except ImportError:
+        from utils.log import get_logger
 
 logger = get_logger(__name__)
 
+
+def _load_symbol(module_names: tuple[str, ...], symbol_name: str) -> Callable[..., Any]:
+    last_error: Exception | None = None
+    for module_name in module_names:
+        try:
+            module = import_module(module_name)
+            return getattr(module, symbol_name)
+        except Exception as exc:
+            last_error = exc
+    raise ImportError(f"Unable to import {symbol_name} from {module_names}") from last_error
+
+
+async def run_multi_search(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    impl = _load_symbol(
+        (
+            "CredenceAI.backend.agent.pipelines.multi_search",
+            "pipelines.multi_search",
+        ),
+        "run_multi_search",
+    )
+    return await impl(*args, **kwargs)
+
+
+async def run_social_sentiment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    impl = _load_symbol(
+        (
+            "CredenceAI.backend.agent.pipelines.social_sentiment",
+            "pipelines.social_sentiment",
+        ),
+        "run_social_sentiment",
+    )
+    return await impl(*args, **kwargs)
+
+
+async def run_model_validation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    impl = _load_symbol(
+        (
+            "CredenceAI.backend.agent.pipelines.model_validation",
+            "pipelines.model_validation",
+        ),
+        "run_model_validation",
+    )
+    return await impl(*args, **kwargs)
+
+
+async def run_source_behavior(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    impl = _load_symbol(
+        (
+            "CredenceAI.backend.agent.pipelines.source_behavior",
+            "pipelines.source_behavior",
+        ),
+        "run_source_behavior",
+    )
+    return await impl(*args, **kwargs)
+
+
+def build_output(
+    *,
+    claim_id: str,
+    p_true: float,
+    credibility_score: int,
+    bucket: str,
+    ci: list[float],
+    explanation: str,
+    evidence_units: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+    risk_proxy: float | None,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    output = {
+        "claim_id": claim_id,
+        "p_true": p_true,
+        "credibility_score": credibility_score,
+        "bucket": bucket,
+        "confidence_interval": ci,
+        "explanation": explanation,
+        "evidence_units": evidence_units,
+        "actions": actions,
+        "risk_proxy": risk_proxy,
+        "meta": meta,
+        "zero_trust_mode": True,
+    }
+    return output
+
+
+from typing import Any
+
+from backend.agent.pipelines.multi_search     import run_multi_search
+from backend.agent.pipelines.social_sentiment import run_social_sentiment
+from backend.agent.pipelines.model_validation  import run_model_validation
+from backend.agent.pipelines.source_behavior   import run_source_behavior
+from backend.agent.scoring.aggregator          import aggregate_evidence
+from backend.agent.scoring.classifier          import classify_score
+from backend.agent.config.settings             import AgentSettings
+from backend.agent.utils.logger                import get_logger
+from backend.agent.utils.schema                import ClaimInput, AgentOutput, build_output
+
+logger = get_logger(__name__)
 
 async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None) -> dict[str, Any]:
     """
@@ -107,7 +220,13 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
                            "reason": f"clusters={independent_clusters}, ci_width≈{ci_width_estimate:.2f}"})
         logger.info("Re-search triggered (retry %d)", retries)
 
-        expanded = await run_multi_search(claim_input, settings, retry=retries)
+        try:
+            expanded = await run_multi_search(claim_input, settings, retry=retries)
+        except Exception as exc:
+            logger.warning("Retry multi_search failed: %s", exc)
+            plan_trace.append({"step": "pipeline_error", "pipeline": "multi_search_retry", "error": str(exc)})
+            break
+
         if not isinstance(expanded, Exception) and expanded:
             pipeline_results["multi_search_retry"] = expanded
             all_units = _collect_all_units(pipeline_results)
@@ -124,11 +243,13 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
     plan_trace.append({"step": "aggregation_complete", "p_true": p_true, "ci": ci})
 
     # ── Classify and build actions ───────────────────────────────────────────
+    market_signals = _extract_market_signals(pipeline_results.get("model_validation"))
+
     credibility_score, bucket, actions = classify_score(
         p_true=p_true,
         ci=ci,
         entities=claim_input.entities,
-        market_signals=pipeline_results.get("model_validation", {}) or {},
+        market_signals=market_signals,
         social_signals=pipeline_results.get("social_sentiment", {}) or {},
         independent_clusters=independent_clusters,
     )
@@ -146,7 +267,7 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
         explanation=explanation,
         evidence_units=all_units,
         actions=actions,
-        risk_proxy=pipeline_results.get("model_validation", {}).get("risk_proxy") if pipeline_results.get("model_validation") else None,
+        risk_proxy=market_signals.get("risk_proxy"),
         meta={
             "searches_performed": _count_searches(pipeline_results),
             "retries": retries,
@@ -186,7 +307,7 @@ def _rough_ci_width(units: list[dict]) -> float:
     """Quick heuristic: fewer high-LR units → wider CI."""
     if not units:
         return 1.0
-    high_lr = sum(1 for u in units if abs(u.get("lr", 1.0) - 1.0) > 0.5)
+    high_lr = sum(1 for u in units if abs(_coerce_float(u.get("lr", 1.0), 1.0) - 1.0) > 0.5)
     if high_lr == 0:
         return 0.8
     return max(0.1, 0.9 - high_lr * 0.15)
@@ -198,6 +319,26 @@ def _count_searches(pipeline_results: dict) -> int:
         if result and isinstance(result, dict):
             total += result.get("searches_performed", 0)
     return total
+
+
+def _extract_market_signals(model_validation_result: dict[str, Any] | None) -> dict[str, Any]:
+    if not model_validation_result or not isinstance(model_validation_result, dict):
+        return {}
+
+    market_signals = model_validation_result.get("market_signals")
+    merged: dict[str, Any] = dict(market_signals) if isinstance(market_signals, dict) else {}
+
+    if "risk_proxy" in model_validation_result and "risk_proxy" not in merged:
+        merged["risk_proxy"] = model_validation_result.get("risk_proxy")
+
+    return merged
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────────

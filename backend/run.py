@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of worker processes (use Gunicorn for >1)",
     )
-    p.add_argument("--app", default="app.main:app", help="ASGI app import path")
+    p.add_argument("--app", default="main:app", help="ASGI app import path")
     return p.parse_args()
 
 
