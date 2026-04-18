@@ -1,30 +1,31 @@
-"""
-verification_agent/pipelines/model_validation.py
-==================================================
-Pipeline 3 — Fact-check APIs + NewsAPI + Finnhub market signals.
-
-PLACEHOLDERS
-------------
-  FACTCHECK_API_KEY    — Google Fact Check Tools API
-  CLAIMBUSTER_API_KEY  — ClaimBuster API
-  NEWSAPI_KEY          — NewsAPI.org
-  FINNHUB_API_KEY      — Finnhub.io
-"""
-
+# backend/agent/pipelines/model_validation.py
 from __future__ import annotations
 import asyncio
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
-
-from config.settings import AgentSettings
+import os
+from dotenv import load_dotenv
 from utils.schema    import ClaimInput
 from utils.logger    import get_logger
 
+# Load .env from repo root (sibling of backend)
+ROOT = Path(__file__).resolve().parents[2]  # backend/agent/pipelines -> parents[2] -> repo root
+ENV_PATH = ROOT / ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=str(ENV_PATH))
+
 logger = get_logger(__name__)
+
+# Environment keys (map your .env names)
+FINNHUB_API_KEY = os.getenv("FINHUB_API")
+NEWSAPI_KEY     = os.getenv("NEWS_API")
+FACTCHECK_KEY   = os.getenv("FACT_CHECK_API")
+GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY")
 
 # Naive list of keywords that hint at a financial claim
 _FINANCE_KEYWORDS = {
@@ -33,8 +34,18 @@ _FINANCE_KEYWORDS = {
     "fiscal", "market", "valuation", "price", "nasdaq", "nyse",
 }
 
+# Optional: lazy import for FinBERT
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    import torch
+    _FINBERT_TOKENIZER = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
+    _FINBERT_MODEL = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
+except Exception:
+    _FINBERT_TOKENIZER = None
+    _FINBERT_MODEL = None
 
-async def run_model_validation(claim: ClaimInput, settings: AgentSettings) -> dict:
+
+async def run_model_validation(claim: ClaimInput, settings) -> dict:
     """
     Returns:
         {
@@ -46,25 +57,28 @@ async def run_model_validation(claim: ClaimInput, settings: AgentSettings) -> di
           "risk_proxy":        float | None,
         }
     """
+    # Determine financialness using claim text + entities
     is_financial = _is_financial_claim(claim.claim_text, claim.entities)
 
     tasks: list[Any] = [
-        _query_google_factcheck(claim, settings),
-        _query_claimbuster(claim, settings),
-        _query_newsapi(claim, settings),
+        _query_google_factcheck(claim),
+        _query_claimbuster(claim),
+        _query_newsapi(claim),
+        _run_rag(claim),  # RAG retrieval + LLM summary (always run; will be no-op if not configured)
     ]
     if is_financial:
-        tasks.append(_query_finnhub(claim, settings))
+        tasks.append(_query_finnhub(claim))
     else:
         tasks.append(asyncio.coroutine(lambda: {})())   # no-op
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    fc_google, fc_claimbuster, news_result, market_result = results
+    fc_google, fc_claimbuster, news_result, rag_result, market_result = results
 
     # Graceful degradation
     fc_google      = fc_google      if not isinstance(fc_google,      Exception) else {}
     fc_claimbuster = fc_claimbuster if not isinstance(fc_claimbuster, Exception) else {}
     news_result    = news_result    if not isinstance(news_result,    Exception) else {}
+    rag_result     = rag_result     if not isinstance(rag_result,     Exception) else {}
     market_result  = market_result  if not isinstance(market_result,  Exception) else {}
 
     evidence_units: list[dict] = []
@@ -75,12 +89,31 @@ async def run_model_validation(claim: ClaimInput, settings: AgentSettings) -> di
     for hit in fc_claimbuster.get("hits", []):
         evidence_units.append(_factcheck_to_unit(hit, "claimbuster"))
 
-    # News coverage units
-    for article in news_result.get("articles", []):
-        evidence_units.append(_news_to_unit(article))
+    # News coverage units (and FinBERT sentiment)
+    news_articles = news_result.get("articles", []) or []
+    fin_sentiments = []
+    for article in news_articles:
+        # compute finbert sentiment if available
+        sentiment = _finbert_sentiment(article.get("description") or article.get("title") or "")
+        fin_sentiments.append(sentiment)
+        unit = _news_to_unit(article)
+        unit["finbert_sentiment"] = sentiment
+        evidence_units.append(unit)
+
+    # RAG units (retrieved docs + LLM summary)
+    for unit in rag_result.get("evidence_units", []):
+        evidence_units.append(unit)
 
     # Market anomaly units
     market_signals = market_result if isinstance(market_result, dict) else {}
+    # If FinBERT sentiment is available, aggregate and fold into market_signals
+    if fin_sentiments:
+        avg_sent = sum(fin_sentiments) / len(fin_sentiments)
+        market_signals["avg_finbert_sentiment"] = round(avg_sent, 3)
+        # adjust anomaly threshold: if strongly negative sentiment, amplify anomaly flag
+        if avg_sent < -0.4 and abs(market_signals.get("price_change_pct", 0)) > 3:
+            market_signals["anomaly"] = True
+
     if market_signals.get("anomaly"):
         evidence_units.append(_market_to_unit(market_signals, claim.entities))
 
@@ -88,14 +121,18 @@ async def run_model_validation(claim: ClaimInput, settings: AgentSettings) -> di
     risk_proxy: float | None = None
     if is_financial:
         price_move = abs(market_signals.get("price_change_pct", 0.0))
-        risk_proxy = min(1.0, price_move / 20.0)
+        # incorporate sentiment: negative sentiment increases risk
+        sentiment_adj = 1.0
+        if market_signals.get("avg_finbert_sentiment") is not None:
+            sentiment_adj += max(0.0, -market_signals["avg_finbert_sentiment"])  # negative sentiment increases risk
+        risk_proxy = min(1.0, (price_move / 20.0) * sentiment_adj)
 
     fact_check_hits  = fc_google.get("hits", []) + fc_claimbuster.get("hits", [])
     primary_docs     = [h for h in fact_check_hits if h.get("is_primary")]
 
     return {
         "evidence_units":     evidence_units,
-        "searches_performed": 3 + int(is_financial),
+        "searches_performed": 4 + int(is_financial),  # added RAG as an extra search
         "fact_check_hits":    fact_check_hits,
         "primary_documents":  primary_docs,
         "market_signals":     market_signals,
@@ -105,14 +142,9 @@ async def run_model_validation(claim: ClaimInput, settings: AgentSettings) -> di
 
 # ── Fact-check APIs ───────────────────────────────────────────────────────────
 
-async def _query_google_factcheck(claim: ClaimInput, settings: AgentSettings) -> dict:
-    """
-    Google Fact Check Tools API.
-    Docs: https://developers.google.com/fact-check/tools/api/reference/rest/v1alpha1/claims/search
-    # ← PLACEHOLDER: requires FACTCHECK_API_KEY
-    """
-    key = settings.factcheck_api_key
-    if key.startswith("YOUR_"):
+async def _query_google_factcheck(claim: ClaimInput) -> dict:
+    key = FACTCHECK_KEY or ""
+    if not key:
         logger.info("Google FactCheck API key not set; skipping")
         return {"hits": []}
     try:
@@ -139,14 +171,9 @@ async def _query_google_factcheck(claim: ClaimInput, settings: AgentSettings) ->
         return {"hits": []}
 
 
-async def _query_claimbuster(claim: ClaimInput, settings: AgentSettings) -> dict:
-    """
-    ClaimBuster API — scores check-worthiness + searches known claims.
-    Docs: https://idir.uta.edu/claimbuster/api
-    # ← PLACEHOLDER: requires CLAIMBUSTER_API_KEY
-    """
-    key = settings.claimbuster_api_key
-    if key.startswith("YOUR_"):
+async def _query_claimbuster(claim: ClaimInput) -> dict:
+    key = os.getenv("CLAIMBUSTER_API") or ""
+    if not key:
         logger.info("ClaimBuster API key not set; skipping")
         return {"hits": []}
     try:
@@ -174,13 +201,9 @@ async def _query_claimbuster(claim: ClaimInput, settings: AgentSettings) -> dict
 
 # ── NewsAPI ───────────────────────────────────────────────────────────────────
 
-async def _query_newsapi(claim: ClaimInput, settings: AgentSettings) -> dict:
-    """
-    Queries NewsAPI for recent coverage of the claim entities.
-    # ← PLACEHOLDER: requires NEWSAPI_KEY (free tier = dev only)
-    """
-    key = settings.newsapi_key
-    if key.startswith("YOUR_"):
+async def _query_newsapi(claim: ClaimInput) -> dict:
+    key = NEWSAPI_KEY or ""
+    if not key:
         logger.info("NewsAPI key not set; skipping")
         return {"articles": []}
     query = " OR ".join(claim.entities[:3]) or claim.claim_text[:80]
@@ -202,7 +225,7 @@ async def _query_newsapi(claim: ClaimInput, settings: AgentSettings) -> dict:
             articles.append({
                 "title":       a.get("title", ""),
                 "url":         a.get("url", ""),
-                "domain":      (a.get("source") or {}).get("id", ""),
+                "domain":      (a.get("source") or {}).get("id", "") or (a.get("source") or {}).get("name",""),
                 "published_at": a.get("publishedAt"),
                 "description": a.get("description", ""),
             })
@@ -214,14 +237,9 @@ async def _query_newsapi(claim: ClaimInput, settings: AgentSettings) -> dict:
 
 # ── Finnhub ───────────────────────────────────────────────────────────────────
 
-async def _query_finnhub(claim: ClaimInput, settings: AgentSettings) -> dict:
-    """
-    Queries Finnhub for price data, company news, and SEC filings.
-    # ← PLACEHOLDER: requires FINNHUB_API_KEY
-    # ← PLACEHOLDER: entity → ticker resolution is naive; plug in a real NER
-    """
-    key = settings.finnhub_api_key
-    if key.startswith("YOUR_"):
+async def _query_finnhub(claim: ClaimInput) -> dict:
+    key = FINNHUB_API_KEY or ""
+    if not key:
         logger.info("Finnhub API key not set; skipping market signals")
         return {}
 
@@ -229,25 +247,31 @@ async def _query_finnhub(claim: ClaimInput, settings: AgentSettings) -> dict:
     if not ticker:
         return {}
 
+    # derive date window from claim timestamp if available
+    try:
+        to_date = datetime.utcnow().date()
+        from_date = to_date - timedelta(days=14)
+        from_str = from_date.isoformat()
+        to_str = to_date.isoformat()
+    except Exception:
+        from_str, to_str = "2026-04-01", "2026-04-18"
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            # Company profile
             profile_resp = await client.get(
                 "https://finnhub.io/api/v1/stock/profile2",
                 params={"symbol": ticker, "token": key},
             )
-            # Quote
             quote_resp = await client.get(
                 "https://finnhub.io/api/v1/quote",
                 params={"symbol": ticker, "token": key},
             )
-            # Company news
             news_resp = await client.get(
                 "https://finnhub.io/api/v1/company-news",
                 params={
                     "symbol": ticker,
-                    "from":   "2026-04-01",   # ← PLACEHOLDER: derive from claim.timestamp
-                    "to":     "2026-04-18",   # ← PLACEHOLDER: derive from claim.timestamp
+                    "from":   from_str,
+                    "to":     to_str,
                     "token":  key,
                 },
             )
@@ -265,7 +289,7 @@ async def _query_finnhub(claim: ClaimInput, settings: AgentSettings) -> dict:
             "company_name":      profile.get("name", ticker),
             "price_change_pct":  round(price_change_pct, 2),
             "current_price":     curr_price,
-            "anomaly":           abs(price_change_pct) > 5,  # ← PLACEHOLDER: tune threshold
+            "anomaly":           abs(price_change_pct) > 5,
             "news_count":        len(news),
             "profile":           profile,
         }
@@ -275,10 +299,6 @@ async def _query_finnhub(claim: ClaimInput, settings: AgentSettings) -> dict:
 
 
 def _resolve_ticker(entities: list[str]) -> str | None:
-    """
-    Extremely naive entity → ticker resolver.
-    PLACEHOLDER: replace with a real NER + ticker lookup service.
-    """
     common = {
         "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL",
         "alphabet": "GOOGL", "amazon": "AMZN", "meta": "META",
@@ -289,6 +309,67 @@ def _resolve_ticker(entities: list[str]) -> str | None:
         if t:
             return t
     return None
+
+
+# ── RAG (lightweight) ───────────────────────────────────────────────────────
+
+async def _run_rag(claim: ClaimInput) -> dict:
+    """
+    Lightweight RAG:
+    - Retrieve top-k docs from a vectorstore (FAISS / Milvus / Pinecone) using claim text.
+    - Call LLM (placeholder using GEMINI_API_KEY) to produce a short evidence summary.
+    - Return evidence_units list compatible with pipeline.
+    """
+    api_key = GEMINI_API_KEY or ""
+    # If no vectorstore or LLM key, skip
+    if not api_key:
+        logger.info("GEMINI_API_KEY not set; skipping RAG")
+        return {"evidence_units": []}
+
+    # Placeholder retrieval: in prod, replace with real vectorstore query
+    # Example: docs = vectorstore.search(claim.claim_text, top_k=5)
+    docs = []  # TODO: plug in your vectorstore retrieval
+
+    # If no docs found, return empty
+    if not docs:
+        return {"evidence_units": []}
+
+    # Placeholder LLM call: summarize retrieved docs + claim
+    # In production, call your LLM endpoint (Gemini or other) with api_key
+    summary = "RAG summary placeholder"  # TODO: call LLM
+
+    units = []
+    for d in docs:
+        units.append({
+            "id": str(uuid.uuid4()),
+            "type": "support",
+            "domain": d.get("source", "vectorstore"),
+            "url": d.get("url", ""),
+            "timestamp": d.get("timestamp"),
+            "similarity": d.get("score", 0.7),
+            "lr": 1.2,
+            "independence_weight": 0.9,
+            "cluster_id": "rag_retrievals",
+            "provenance": "rag",
+            "raw_snippet": d.get("text", "")[:300],
+        })
+
+    # also include a synthetic unit for the LLM summary
+    units.append({
+        "id": str(uuid.uuid4()),
+        "type": "support",
+        "domain": "llm_rag",
+        "url": "",
+        "timestamp": None,
+        "similarity": 0.5,
+        "lr": 1.0,
+        "independence_weight": 0.6,
+        "cluster_id": "rag_summary",
+        "provenance": "rag",
+        "raw_snippet": summary,
+    })
+
+    return {"evidence_units": units}
 
 
 # ── Converters ────────────────────────────────────────────────────────────────
@@ -356,6 +437,27 @@ def _market_to_unit(signals: dict, entities: list[str]) -> dict:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_financial_claim(text: str, entities: list[str]) -> bool:
-    words = set(text.lower().split())
-    entity_words = {w for e in entities for w in e.lower().split()}
+    words = set(re.findall(r"\w+", text.lower()))
+    entity_words = {w for e in entities for w in re.findall(r"\w+", e.lower())}
     return bool((words | entity_words) & _FINANCE_KEYWORDS)
+
+
+def _finbert_sentiment(text: str) -> float:
+    """
+    Returns sentiment score in [-1, 1] where negative is bearish, positive bullish.
+    If FinBERT not available, returns 0.0 (neutral).
+    """
+    if not text or _FINBERT_MODEL is None or _FINBERT_TOKENIZER is None:
+        return 0.0
+    try:
+        inputs = _FINBERT_TOKENIZER(text, return_tensors="pt", truncation=True, max_length=512)
+        with torch.no_grad():
+            logits = _FINBERT_MODEL(**inputs).logits
+            # model outputs 3 classes: negative, neutral, positive
+            probs = torch.softmax(logits, dim=1).squeeze().tolist()
+            neg, neu, pos = probs
+            score = pos - neg  # in [-1,1]
+            return float(score)
+    except Exception as exc:
+        logger.warning("FinBERT sentiment failed: %s", exc)
+        return 0.0

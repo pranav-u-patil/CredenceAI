@@ -8,8 +8,9 @@ import {
   PromptInputAction,
 } from "./components/ui/prompt-input";
 import { Button } from "./components/ui/button";
-import { ArrowUp, Paperclip, Square, X, ShieldCheck } from "lucide-react";
+import { ArrowUp, Paperclip, Square, X, ShieldCheck, GitFork } from "lucide-react";
 import { cn } from "./lib/utils";
+import EvidenceGraph from "./components/ui/evidence-graph";
 
 /* ── Skeleton bars ────────────────────────────────── */
 const skeletonBars = [
@@ -59,15 +60,29 @@ function ResultContent({ result }) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: "easeOut" }}
-      className="flex flex-col gap-4 w-full"
+      className="flex flex-col gap-5 w-full"
     >
-      <div className="flex items-center gap-2">
-        <ShieldCheck className="h-4 w-4 text-green-500 flex-shrink-0" />
-        <span className="text-xs font-semibold tracking-widest uppercase text-green-600">
-          Analysis complete
-        </span>
+      {/* ─ Summary section ─ */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <ShieldCheck className="h-4 w-4 text-green-500 flex-shrink-0" />
+          <span className="text-xs font-semibold tracking-widest uppercase text-green-600">
+            Analysis complete
+          </span>
+        </div>
+        <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{result}</p>
       </div>
-      <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{result}</p>
+
+      {/* ─ Evidence Graph section ─ */}
+      <div>
+        <div className="flex items-center gap-2 mb-3 pt-3 border-t border-gray-100">
+          <GitFork className="h-4 w-4 text-indigo-500 flex-shrink-0" />
+          <span className="text-xs font-semibold tracking-widest uppercase text-indigo-600">
+            Evidence Graph
+          </span>
+        </div>
+        <EvidenceGraph />
+      </div>
     </motion.div>
   );
 }
@@ -84,7 +99,7 @@ function ResultsPanel({ isLoading, result, onClose }) {
           exit={{ opacity: 0, scale: 0.97, y: 8 }}
           transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
           className="absolute z-20 left-1/2 -translate-x-1/2"
-          style={{ top: "18%", width: "min(620px, 90vw)" }}
+          style={{ top: "4%", width: "min(1100px, 95vw)" }}
         >
           <div
             className="relative rounded-2xl border border-gray-200/80 shadow-2xl overflow-hidden"
@@ -122,7 +137,7 @@ function ResultsPanel({ isLoading, result, onClose }) {
                 </button>
               )}
             </div>
-            <div className="px-5 py-5 min-h-[180px]">
+            <div className="px-5 py-5 min-h-[180px] max-h-[75vh] overflow-y-auto">
               <AnimatePresence mode="wait">
                 {isLoading ? (
                   <motion.div
@@ -168,10 +183,9 @@ function PromptInputWithActions({ input, setInput, isLoading, onSubmit, isActive
     /* Animate width (shrink) and scale on submit */
     <motion.div
       animate={{
-        maxWidth: isActive ? "450px" : "620px",
-        scale: isActive ? 0.93 : 1,
+        maxWidth: isActive ? "940px" : "620px",
       }}
-      transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
       className="w-full"
     >
       <PromptInput
@@ -179,31 +193,43 @@ function PromptInputWithActions({ input, setInput, isLoading, onSubmit, isActive
         onValueChange={setInput}
         isLoading={isLoading}
         onSubmit={handleSubmit}
-        className="w-full shadow-lg"
+        className={cn(
+          "w-full shadow-xl transition-all duration-500",
+          isActive ? "rounded-2xl p-1.5" : "rounded-3xl p-2"
+        )}
       >
         {files.length > 0 && (
           <div className="flex flex-wrap gap-2 pb-2">
             {files.map((file, idx) => (
               <div
                 key={idx}
-                className="bg-gray-100 flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-gray-700"
+                className="bg-gray-100 flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-gray-700"
               >
-                <Paperclip className="h-4 w-4" />
-                <span className="max-w-[120px] truncate">{file.name}</span>
+                <Paperclip className="h-3 w-3" />
+                <span className="max-w-[100px] truncate">{file.name}</span>
                 <button
                   onClick={() => handleRemoveFile(idx)}
-                  className="hover:bg-gray-200 rounded-full p-1"
+                  className="hover:bg-gray-200 rounded-full p-0.5"
                 >
-                  <X className="h-4 w-4" />
+                  <X className="h-3 w-3" />
                 </button>
               </div>
             ))}
           </div>
         )}
 
-        <PromptInputTextarea placeholder="Ask me anything..." />
+        <PromptInputTextarea 
+          placeholder="Ask me anything..." 
+          className={cn(
+            "transition-all duration-500",
+            isActive ? "min-h-[32px] text-sm py-1" : "min-h-[44px]"
+          )}
+        />
 
-        <PromptInputActions className="flex items-center justify-between gap-2 pt-2">
+        <PromptInputActions className={cn(
+          "flex items-center justify-between gap-2",
+          isActive ? "pt-1" : "pt-2"
+        )}>
           <PromptInputAction tooltip="Attach files">
             <label
               htmlFor="file-upload"

@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import importlib
-from app.models.schema import ScraperInput
+from app.models.schema import ScraperInput  # your Pydantic models
 
 app = FastAPI(title="CredenceAI")
 logger = logging.getLogger(__name__)
