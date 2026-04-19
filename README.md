@@ -13,20 +13,81 @@ Upload your two architecture images and place them in a folder such as docs/imag
 
 ### Architecture Diagram 1
 
-![System Architecture](./system-architecture-1.png)
+![System Architecture](..\CredenceAI\docs\images\System_Architechture1.png)
 
 ### Architecture Diagram 2
 
-![System Architecture](./system-architecture-1.png)
+![System Architecture](../CredenceAI\docs\images\System_Architechture2.jpeg)
 
 ## Repository Structure
 
 ```text
 CredenceAi/
-	backend/         # FastAPI ingestion and Python verification pipeline logic
-	backend-java/    # Spring Boot verification API with Gemini call + risk classifier
-	frontend/        # React + Vite user interface
+	backend/               # FastAPI ingestion and Python verification pipeline logic
+	backend-java/           # Spring Boot verification API with Gemini call + risk classifier
+	frontend/              # React + Vite user interface
 ```
+
+---
+
+## Free-Tier Token Budget Strategy
+
+The system is carefully designed to stay within free limits:
+
+### Gemini Flash (gemini-1.5-flash)
+- **Model choice**: Flash is ~20× cheaper than Pro, still excellent for synthesis
+- **Rate limiter**: Built-in 4.5s cooldown between calls (stays under 15 RPM)
+- **Max tokens**: 2048 per response — concise, bullet-pointed outputs
+- **Call count per analysis**: Exactly 2 Gemini calls (planning + synthesis)
+- **Context pruning**: Only top 8 articles sent to Gemini, truncated to 150 chars each
+
+### NewsAPI (100 req/day)
+- Max 5 articles per query
+- Query cap: 3 queries maximum
+- 15-minute response cache (prevents duplicate calls on re-runs)
+
+### Finnhub (60 req/min)
+- Only called if ticker symbol detected in queries
+- 5-minute cache on market data
+- Maximum 2 calls per analysis session
+
+### crawl4ai
+- **Zero API cost** — local browser-based scraper
+- Only enriches top 2 articles per run (saves time + resources)
+- 15-minute response cache enabled
+
+---
+
+---
+
+## Extending the System
+
+### Add a new news source to the credibility database
+Edit `backend/agents/source_analyzer.py` → `KNOWN_SOURCES` dict:
+```python
+"yourdomain.com": {"credibility": 75, "lean": 0, "type": "tech", "fact_check": "medium"},
+```
+
+### Add new risk keywords
+Edit `backend/agents/risk_engine.py`:
+```python
+HIGH_RISK_KEYWORDS = [..., "your_keyword"]
+```
+
+### Add more Gemini analysis stages
+Extend the `run_full_pipeline` generator in `backend/agents/orchestrator.py`.
+Each `yield` sends an SSE event to the frontend in real-time.
+
+### Adjust token budget
+All limits in `backend/config/settings.py`:
+```python
+GEMINI_MAX_TOKENS_PER_REQUEST = 2048                       # increase for richer synthesis
+NEWS_API_MAX_ARTICLES = 5              # increase for more coverage
+CRAWL4AI_MAX_PAGES_PER_QUERY = 3 # increase for deeper scraping
+```
+
+---
+
 
 ## Core Components
 
@@ -156,34 +217,6 @@ Request body example:
 }
 ```
 
-Response example:
-
-```json
-{
-	"status": "accepted",
-	"claim_id": "claim_1713500000"
-}
-```
-
-### Java backend endpoint
-
-POST /verify
-
-Request body example:
-
-```json
-{
-	"text": "Your claim to verify"
-}
-```
-
-Response example:
-
-```json
-{
-	"result": "Low Risk: The claim appears credible."
-}
-```
 
 ## Testing
 
