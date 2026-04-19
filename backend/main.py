@@ -1,10 +1,17 @@
 # main.py (place next to run.py)
 import asyncio
 import logging
-from fastapi import FastAPI, Request
+from datetime import datetime, timezone
+from importlib import import_module
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import importlib
+from pydantic import BaseModel, Field, HttpUrl
+
 from app.models.schema import ScraperInput  # your Pydantic models
+from services.scrap import build_claim_from_preview, scrape_article_preview
 
 app = FastAPI(title="CredenceAI")
 logger = logging.getLogger(__name__)
@@ -19,6 +26,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ArticleRequest(BaseModel):
+    url: HttpUrl
+    claim_text: Optional[str] = Field(default=None, description="Optional custom claim text for deeper analysis")
+    entities: Optional[List[str]] = Field(default_factory=list)
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+def _load_run_agent():
+    try:
+        module = import_module("agent.agent")
+    except ModuleNotFoundError:
+        module = import_module("CredenceAI.backend.agent.agent")
+    return getattr(module, "run_agent")
 
 @app.on_event("startup")
 async def startup():
@@ -57,3 +79,42 @@ async def ingest(payload: ScraperInput, request: Request):
     q = request.app.state.agent_queue
     await q.put(payload.dict())
     return {"status":"accepted", "claim_id": payload.claim_id}
+
+
+@app.post("/preview/article")
+async def preview_article(payload: ArticleRequest):
+    preview = await scrape_article_preview(str(payload.url))
+    if preview.get("status") != "success":
+        raise HTTPException(status_code=422, detail=preview.get("error") or "Unable to scrape article")
+
+    return {
+        "status": "preview_ready",
+        "preview": preview,
+        "claim_text": payload.claim_text or preview.get("title") or preview.get("summary") or preview.get("snippet") or str(payload.url),
+    }
+
+
+@app.post("/analyze/article")
+async def analyze_article(payload: ArticleRequest):
+    preview = await scrape_article_preview(str(payload.url))
+    if preview.get("status") != "success":
+        raise HTTPException(status_code=422, detail=preview.get("error") or "Unable to scrape article")
+
+    claim_id = f"claim_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    claim_payload = build_claim_from_preview(
+        url=str(payload.url),
+        preview=preview,
+        claim_id=claim_id,
+        claim_text=payload.claim_text,
+        entities=payload.entities,
+        context=payload.context,
+    )
+
+    run_agent = _load_run_agent()
+    analysis = await run_agent(claim_payload)
+
+    return {
+        "status": "analysis_complete",
+        "preview": preview,
+        "analysis": analysis,
+    }

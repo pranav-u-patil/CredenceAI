@@ -16,6 +16,8 @@ class AgentSettings:
     max_searches:   int   = 6
     max_elapsed_ms: int   = 30_000   # 30 s wall-clock budget per claim
     max_retries:    int   = 2
+    agentic_mode:   str   = "scratch"
+    enable_generative_review: bool = False
 
     # ── Bayesian prior ────────────────────────────────────────────────────────
     # 0.5 = maximum uncertainty (uninformative prior).
