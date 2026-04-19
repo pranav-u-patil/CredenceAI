@@ -145,10 +145,9 @@ export function Header() {
           </span>
         </button>
 
-        {/* ── RIGHT: Action buttons ───────────────────────────────── */}
         <div className="flex items-center gap-2.5">
           {/* Telegram */}
-          <IconButton
+          {/* <IconButton
             label="Telegram"
             glowColor="#38bdf8"
             hoverBg="hover:bg-sky-500/[0.12]"
@@ -156,10 +155,10 @@ export function Header() {
             <span className="text-sky-400 transition-colors duration-200 group-hover:text-sky-300">
               <TelegramIcon />
             </span>
-          </IconButton>
+          </IconButton> */}
 
           {/* Discord */}
-          <IconButton
+          {/* <IconButton
             label="Discord"
             glowColor="#a78bfa"
             hoverBg="hover:bg-purple-500/[0.12]"
@@ -167,10 +166,10 @@ export function Header() {
             <span className="text-purple-400 transition-colors duration-200 group-hover:text-purple-300">
               <DiscordIcon />
             </span>
-          </IconButton>
+          </IconButton> */}
 
           {/* WhatsApp */}
-          <IconButton
+          {/* <IconButton
             label="WhatsApp"
             glowColor="#4ade80"
             hoverBg="hover:bg-emerald-500/[0.12]"
@@ -178,7 +177,7 @@ export function Header() {
             <span className="text-emerald-400 transition-colors duration-200 group-hover:text-emerald-300">
               <WhatsAppIcon />
             </span>
-          </IconButton>
+          </IconButton> */}
 
           {/* Divider */}
           <div className="mx-1 h-6 w-px bg-white/[0.08]" />
@@ -188,34 +187,26 @@ export function Header() {
             onClick={() => navigate("/finance")}
             className="
               group relative flex h-8 items-center gap-2
-              rounded-full border border-amber-400/20
-              bg-gradient-to-r from-amber-500/[0.12] to-orange-500/[0.08]
+              rounded-full border border-violet-300/40
+              bg-gradient-to-r from-violet-500/10 via-purple-500/10 to-fuchsia-500/10
               px-4
               backdrop-blur-md
               transition-all duration-300 ease-out
-              hover:scale-105 hover:border-amber-400/35
-              hover:from-amber-500/[0.2] hover:to-orange-500/[0.15]
+              hover:scale-105 hover:border-violet-400/50
+              hover:from-violet-500/20 hover:via-purple-500/20 hover:to-fuchsia-500/20
               cursor-pointer
               active:scale-95
+              shadow-[0_2px_10px_-2px_rgba(139,92,246,0.15)]
+              hover:shadow-[0_4px_16px_-2px_rgba(139,92,246,0.3)]
             "
             style={{
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.boxShadow = `
-                inset 0 1px 0 rgba(255,255,255,0.1),
-                0 0 20px rgba(251,191,36,0.18),
-                0 4px 14px rgba(0,0,0,0.1)
-              `;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.06)";
+              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.4)",
             }}
           >
-            <span className="text-amber-400 transition-colors duration-200 group-hover:text-amber-300">
+            <span className="text-violet-600 transition-colors duration-200 group-hover:text-violet-700 drop-shadow-sm">
               <FinanceIcon />
             </span>
-            <span className="text-[13px] font-semibold tracking-wide text-amber-300/90 transition-colors duration-200 group-hover:text-amber-200">
+            <span className="text-[13px] font-semibold tracking-wide text-violet-700 transition-colors duration-200 group-hover:text-violet-800 drop-shadow-sm">
               Finance
             </span>
           </button>

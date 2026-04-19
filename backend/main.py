@@ -118,3 +118,29 @@ async def analyze_article(payload: ArticleRequest):
         "preview": preview,
         "analysis": analysis,
     }
+
+
+@app.post("/analyze/claim")
+async def analyze_claim(payload: ScraperInput):
+    """Run the full agent pipeline on a plain-text claim (no URL needed)."""
+    claim_id = payload.claim_id or f"claim_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+
+    claim_payload = {
+        "claim_id": claim_id,
+        "claim_text": payload.claim_text,
+        "timestamp": payload.timestamp.isoformat() if payload.timestamp else datetime.now(timezone.utc).isoformat(),
+        "initial_urls": [u.dict() for u in payload.initial_urls] if payload.initial_urls else [],
+        "entities": payload.entities or [],
+        "context": payload.context or {},
+        "source_meta": payload.source_meta or {},
+    }
+
+    run_agent = _load_run_agent()
+    analysis = await run_agent(claim_payload)
+
+    return {
+        "status": "analysis_complete",
+        "claim_id": claim_id,
+        "claim_text": payload.claim_text,
+        "analysis": analysis,
+    }

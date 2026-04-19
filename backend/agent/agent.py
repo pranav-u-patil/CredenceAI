@@ -61,8 +61,9 @@ def _load_symbol(module_names: tuple[str, ...], symbol_name: str) -> Callable[..
 async def run_multi_search(*args: Any, **kwargs: Any) -> dict[str, Any]:
     impl = _load_symbol(
         (
-            "CredenceAI.backend.agent.pipelines.multi_search",
+            "agent.pipelines.multi_search",
             "pipelines.multi_search",
+            "CredenceAI.backend.agent.pipelines.multi_search",
         ),
         "run_multi_search",
     )
@@ -72,8 +73,9 @@ async def run_multi_search(*args: Any, **kwargs: Any) -> dict[str, Any]:
 async def run_social_sentiment(*args: Any, **kwargs: Any) -> dict[str, Any]:
     impl = _load_symbol(
         (
-            "CredenceAI.backend.agent.pipelines.social_sentiment",
+            "agent.pipelines.social_sentiment",
             "pipelines.social_sentiment",
+            "CredenceAI.backend.agent.pipelines.social_sentiment",
         ),
         "run_social_sentiment",
     )
@@ -83,8 +85,9 @@ async def run_social_sentiment(*args: Any, **kwargs: Any) -> dict[str, Any]:
 async def run_model_validation(*args: Any, **kwargs: Any) -> dict[str, Any]:
     impl = _load_symbol(
         (
-            "CredenceAI.backend.agent.pipelines.model_validation",
+            "agent.pipelines.model_validation",
             "pipelines.model_validation",
+            "CredenceAI.backend.agent.pipelines.model_validation",
         ),
         "run_model_validation",
     )
@@ -94,8 +97,9 @@ async def run_model_validation(*args: Any, **kwargs: Any) -> dict[str, Any]:
 async def run_source_behavior(*args: Any, **kwargs: Any) -> dict[str, Any]:
     impl = _load_symbol(
         (
-            "CredenceAI.backend.agent.pipelines.source_behavior",
+            "agent.pipelines.source_behavior",
             "pipelines.source_behavior",
+            "CredenceAI.backend.agent.pipelines.source_behavior",
         ),
         "run_source_behavior",
     )
@@ -239,15 +243,36 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
 
     # ── Aggregate evidence → P_true ─────────────────────────────────────────
     plan_trace.append({"step": "aggregation_start", "total_units": len(all_units)})
+   # ── SYSTEM AGGREGATION (20%) ─────────────────────────────
     aggregation = aggregate_evidence(all_units, prior=settings.prior_p_true)
-    p_true     = aggregation["p_true"]
-    ci         = aggregation["confidence_interval"]
-    explanation= aggregation["explanation"]
 
-    plan_trace.append({"step": "aggregation_complete", "p_true": p_true, "ci": ci})
+    system_summary = {
+        "p_true": aggregation["p_true"],
+        "confidence_interval": aggregation["confidence_interval"],
+        "support_units": len([u for u in all_units if u.get("type") == "support"]),
+        "contradict_units": len([u for u in all_units if u.get("type") == "contradict"]),
+        "neutral_units": len([u for u in all_units if u.get("type") == "neutral"]),
+    }
 
-    # ── Classify and build actions ───────────────────────────────────────────
-    market_signals = _extract_market_signals(pipeline_results.get("model_validation"))
+    gemini_result = await _gemini_final(
+        claim_input.claim_text,
+        system_summary,
+        settings.gemini_api_key
+    )
+
+    gemini_p = float(gemini_result.get("p_true", 0.5))
+    system_p = float(aggregation["p_true"])
+
+    # ── 80:20 FUSION ───────────────────────────────────────────
+    p_true = (0.80 * gemini_p) + (0.20 * system_p)
+
+    ci = aggregation["confidence_interval"]
+    explanation = f"{aggregation['explanation']} | Gemini 80% override applied"
+
+    # ── CLASSIFICATION INPUT UPDATE ───────────────────────────
+    market_signals = _extract_market_signals(
+        pipeline_results.get("model_validation")
+    )
 
     credibility_score, bucket, actions = classify_score(
         p_true=p_true,
@@ -257,7 +282,6 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
         social_signals=pipeline_results.get("social_sentiment", {}) or {},
         independent_clusters=independent_clusters,
     )
-
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     plan_trace.append({"step": "done", "elapsed_ms": elapsed_ms})
 

@@ -10,21 +10,68 @@ import "reactflow/dist/style.css";
 import { AnimatePresence, motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { createPortal } from "react-dom";
+import dagre from "dagre";
 
+/* ─────────────────────────────────────────────────────
+ *  Dagre Auto-Layout Helper
+ * ─────────────────────────────────────────────────── */
+function applyDagreLayout(nodes, edges, direction = "LR") {
+  if (!nodes || nodes.length === 0) return nodes;
+
+  const g = new dagre.graphlib.Graph();
+  g.setDefaultEdgeLabel(() => ({}));
+  g.setGraph({
+    rankdir: direction,
+    ranksep: 140,
+    nodesep: 90,
+    marginx: 40,
+    marginy: 40,
+  });
+
+  nodes.forEach((n) => {
+    // Give each node type a realistic size for spacing
+    const width  = n.type === "claim" ? 270 : n.type === "evidence" ? 250 : 160;
+    const height = n.type === "claim" ? 120 : n.type === "evidence" ? 130 : 70;
+    g.setNode(n.id, { width, height });
+  });
+
+  edges.forEach((e) => {
+    if (g.hasNode(e.source) && g.hasNode(e.target)) {
+      g.setEdge(e.source, e.target);
+    }
+  });
+
+  dagre.layout(g);
+
+  return nodes.map((n) => {
+    const node = g.node(n.id);
+    if (!node) return n;
+    return {
+      ...n,
+      position: {
+        x: node.x - node.width  / 2,
+        y: node.y - node.height / 2,
+      },
+    };
+  });
+}
+
+/* ─────────────────────────────────────────────────────
+ *  Node Types Registry
+ * ─────────────────────────────────────────────────── */
 const NODE_TYPES = {
-  claim: ClaimNode,
+  claim:    ClaimNode,
   evidence: EvidenceNode,
-  entity: EntityNode,
+  entity:   EntityNode,
 };
 
 /* ─────────────────────────────────────────────────────
  *  Custom Node Components
  * ─────────────────────────────────────────────────── */
-
 function ClaimNode({ data }) {
   return (
     <div className="relative group" style={{ minWidth: 200, maxWidth: 270 }}>
-      {/* Glow ring */}
       <div
         className="absolute -inset-[3px] rounded-2xl opacity-60 blur-sm"
         style={{
@@ -170,33 +217,33 @@ const mkRef = (id, source, target, label, opts = {}) => ({
 });
 
 /* ─────────────────────────────────────────────────────
- *  Mock Data
+ *  Mock Data  (raw positions — dagre will override)
  * ─────────────────────────────────────────────────── */
-const mockNodes = [
-  { id: "claim-1", type: "claim", position: { x: 390, y: 155 },
+const rawMockNodes = [
+  { id: "claim-1", type: "claim", position: { x: 0, y: 0 },
     data: { label: "Earth is approximately spherical", tag: "PRIMARY CLAIM", confidence: 97,
             bg: "linear-gradient(135deg, #4f46e5, #7c3aed)", glowFrom: "#818cf8", glowTo: "#a78bfa" } },
-  { id: "claim-2", type: "claim", position: { x: 390, y: 415 },
+  { id: "claim-2", type: "claim", position: { x: 0, y: 0 },
     data: { label: "Lunar eclipses show curved shadows", tag: "SUPPORTING CLAIM", confidence: 92,
             bg: "linear-gradient(135deg, #6366f1, #818cf8)" } },
 
-  { id: "ev-1", type: "evidence", position: { x: 30,  y: 20  },
+  { id: "ev-1", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Satellite imagery confirms spherical geometry",         tag: "DATASET",      relation: "supports",    source: "NASA",              credibility: 98 } },
-  { id: "ev-2", type: "evidence", position: { x: 30,  y: 260 },
+  { id: "ev-2", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Ships disappear hull-first over the horizon",           tag: "OBSERVATION",  relation: "supports",    source: "Marine Research",   credibility: 85 } },
-  { id: "ev-3", type: "evidence", position: { x: 760, y: 20  },
+  { id: "ev-3", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Gravity measurements show spherical mass distribution", tag: "PHYSICS",      relation: "supports",    source: "CERN",              credibility: 95 } },
-  { id: "ev-5", type: "evidence", position: { x: 760, y: 170 },
+  { id: "ev-5", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Atmospheric pressure gradients follow elevation",       tag: "METEOROLOGY",  relation: "supports",    source: "NOAA",              credibility: 88 } },
-  { id: "ev-6", type: "evidence", position: { x: 30,  y: 540 },
+  { id: "ev-6", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Star constellations shift predictably with latitude",   tag: "ASTRONOMY",    relation: "supports",    source: "Royal Observatory", credibility: 94 } },
-  { id: "ev-4", type: "evidence", position: { x: 820, y: 450 },
+  { id: "ev-4", type: "evidence", position: { x: 0, y: 0 },
     data: { label: "Perceived flat horizon on high-altitude balloon flights",tag: "DISPUTED",    relation: "contradicts", source: "Flat Earth Community", credibility: 8 } },
 
-  { id: "ent-1", type: "entity", position: { x: 810, y: -65  }, data: { label: "NASA",         emoji: "🚀", tag: "AGENCY" } },
-  { id: "ent-2", type: "entity", position: { x: -90, y: 360  }, data: { label: "Eratosthenes", emoji: "📐", tag: "HISTORICAL" } },
-  { id: "ent-3", type: "entity", position: { x: 90,  y: -65  }, data: { label: "Aristotle",    emoji: "🏛",  tag: "HISTORICAL" } },
-  { id: "ent-4", type: "entity", position: { x: 430, y: 585  }, data: { label: "ISS",          emoji: "🛸", tag: "FACILITY" } },
+  { id: "ent-1", type: "entity", position: { x: 0, y: 0 }, data: { label: "NASA",         emoji: "🚀", tag: "AGENCY" } },
+  { id: "ent-2", type: "entity", position: { x: 0, y: 0 }, data: { label: "Eratosthenes", emoji: "📐", tag: "HISTORICAL" } },
+  { id: "ent-3", type: "entity", position: { x: 0, y: 0 }, data: { label: "Aristotle",    emoji: "🏛",  tag: "HISTORICAL" } },
+  { id: "ent-4", type: "entity", position: { x: 0, y: 0 }, data: { label: "ISS",          emoji: "🛸", tag: "FACILITY" } },
 ];
 
 const mockEdges = [
@@ -212,10 +259,8 @@ const mockEdges = [
     labelStyle: { fontSize: 9, fontWeight: 700, letterSpacing: "0.08em", fill: "#6366f1" },
     labelBgStyle: { fill: "#eef2ff", fillOpacity: 0.9 },
   }),
-
   mkContra("e-ev4-c1",   "ev-4",  "claim-1", "CONTRADICTS"),
   mkContra("e-ev3-ev4",  "ev-3",  "ev-4",    "REFUTES",     { style: { stroke: "#ef4444", strokeWidth: 1.5, opacity: 0.55 } }),
-
   mkRef("e-ent1-ev1", "ent-1", "ev-1",    "PUBLISHED"),
   mkRef("e-ent1-ev3", "ent-1", "ev-3",    "CITED IN"),
   mkRef("e-ent2-ev2", "ent-2", "ev-2",    "PROPOSED"),
@@ -223,7 +268,8 @@ const mockEdges = [
   mkRef("e-ent4-ev1", "ent-4", "ev-1",    "PLATFORM"),
 ];
 
-import { createPortal } from "react-dom";
+// Pre-compute dagre layout for mock data once (avoids re-layout on every render)
+const mockNodes = applyDagreLayout(rawMockNodes, mockEdges, "LR");
 
 /* ─────────────────────────────────────────────────────
  *  Shared graph canvas
@@ -249,7 +295,7 @@ function GraphCanvas({ nodes, edges, padding = 0.12, interactive = true }) {
       panOnDrag={interactive}
       zoomOnScroll={interactive}
       zoomOnPinch={interactive}
-      panOnScroll={false} // Always false to prevent scroll hijacking
+      panOnScroll={false}
       preventScrolling={interactive}
       proOptions={{ hideAttribution: true }}
       defaultEdgeOptions={{ type: "smoothstep" }}
@@ -269,17 +315,65 @@ function GraphCanvas({ nodes, edges, padding = 0.12, interactive = true }) {
 /* ─────────────────────────────────────────────────────
  *  Evidence Graph Component
  * ─────────────────────────────────────────────────── */
-export default function EvidenceGraph({ nodes, edges }) {
+export default function EvidenceGraph({ analysis, nodes, edges }) {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  const graphNodes = nodes || mockNodes;
-  const graphEdges = edges || mockEdges;
+  let graphNodes = nodes || mockNodes;
+  let graphEdges = edges || mockEdges;
+
+  if (analysis?.evidence_units && analysis.evidence_units.length > 0) {
+    const outNodes = [];
+    const outEdges = [];
+
+    // Central claim node (position doesn't matter — dagre will place it)
+    outNodes.push({
+      id: "claim-center",
+      type: "claim",
+      position: { x: 0, y: 0 },
+      data: {
+        label: analysis.claim_text || "Central Claim",
+        tag: "PRIMARY CLAIM",
+        confidence: Math.round((analysis.p_true || 0) * 100),
+        bg: "linear-gradient(135deg, #4f46e5, #7c3aed)",
+        glowFrom: "#818cf8",
+        glowTo: "#a78bfa",
+      },
+    });
+
+    analysis.evidence_units.forEach((unit, idx) => {
+      const eNodeId = `ev-${idx}`;
+
+      outNodes.push({
+        id: eNodeId,
+        type: "evidence",
+        position: { x: 0, y: 0 }, // dagre handles placement
+        data: {
+          label: (unit.raw_snippet || unit.snippet || "Evidence Snippet").slice(0, 100) + "...",
+          tag: (unit.domain || unit.provenance || "SOURCE").toUpperCase(),
+          relation: unit.polarity || "neutral",
+          source: unit.domain || "Web Search",
+          credibility: Math.round((unit.similarity || 0) * 100),
+        },
+      });
+
+      if (unit.polarity === "support") {
+        outEdges.push(mkSupport(`e-${idx}`, eNodeId, "claim-center", "SUPPORTS"));
+      } else if (unit.polarity === "contradict") {
+        outEdges.push(mkContra(`e-${idx}`, eNodeId, "claim-center", "CONTRADICTS"));
+      } else {
+        outEdges.push(mkRef(`e-${idx}`, eNodeId, "claim-center", "NEUTRAL"));
+      }
+    });
+
+    // ✅ Apply dagre layout — all nodes spread out cleanly, no overlaps
+    graphNodes = applyDagreLayout(outNodes, outEdges, "LR");
+    graphEdges = outEdges;
+  }
 
   const fullscreenUI = (
     <AnimatePresence>
       {isFullscreen && (
         <>
-          {/* Blurred backdrop */}
           <motion.div
             key="backdrop"
             initial={{ opacity: 0 }}
@@ -296,8 +390,6 @@ export default function EvidenceGraph({ nodes, edges }) {
               WebkitBackdropFilter: "blur(14px)",
             }}
           />
-
-          {/* Fullscreen graph panel */}
           <motion.div
             key="fullscreen"
             initial={{ opacity: 0, scale: 0.98 }}
@@ -314,7 +406,6 @@ export default function EvidenceGraph({ nodes, edges }) {
               flexDirection: "column",
             }}
           >
-            {/* Header */}
             <div
               className="flex items-center justify-between px-6 py-4 flex-shrink-0"
               style={{ borderBottom: "1px solid rgba(0,0,0,0.06)", background: "#f9fafb" }}
@@ -334,8 +425,6 @@ export default function EvidenceGraph({ nodes, edges }) {
                 <span className="font-bold uppercase tracking-wider">Close Analysis</span>
               </button>
             </div>
-
-            {/* Graph fills remaining space */}
             <div className="flex-1 min-h-0 bg-white">
               <GraphCanvas nodes={graphNodes} edges={graphEdges} padding={0.04} interactive={true} />
             </div>
@@ -347,14 +436,11 @@ export default function EvidenceGraph({ nodes, edges }) {
 
   return (
     <>
-      {/* ── Inline preview ── */}
       <div
         className="relative w-full rounded-xl overflow-hidden border border-gray-100"
         style={{ height: 420 }}
       >
         <GraphCanvas nodes={graphNodes} edges={graphEdges} interactive={false} />
-
-        {/* Fullscreen button */}
         <button
           onClick={() => setIsFullscreen(true)}
           className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-gray-500 hover:text-gray-800 transition-all duration-200"
@@ -369,8 +455,6 @@ export default function EvidenceGraph({ nodes, edges }) {
           <span className="text-[10px] font-semibold tracking-wide">Fullscreen</span>
         </button>
       </div>
-
-      {/* Render fullscreen portal at body level to escape parent transforms */}
       {typeof document !== "undefined" && createPortal(fullscreenUI, document.body)}
     </>
   );
