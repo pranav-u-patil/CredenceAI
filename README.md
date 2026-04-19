@@ -13,11 +13,11 @@ Upload your two architecture images and place them in a folder such as docs/imag
 
 ### Architecture Diagram 1
 
-![System Architecture 1](docs/images/system-architecture-1.png)
+![System Architecture](./system-architecture-1.png)
 
 ### Architecture Diagram 2
 
-![System Architecture 2](docs/images/system-architecture-2.png)
+![System Architecture](./system-architecture-1.png)
 
 ## Repository Structure
 
