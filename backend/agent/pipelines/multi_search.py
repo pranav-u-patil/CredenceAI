@@ -1,37 +1,52 @@
 """
 verification_agent/pipelines/multi_search.py
 =============================================
-Pipeline 1 — Zero-trust multi-source frequency analysis.
-
-Steps
------
-1. Generate up to 6 paraphrase queries from claim_text.
-2. Run searches via configured backend (DuckDuckGo by default).
-3. Fetch page content via crawl4ai or httpx fallback.
-4. Compute semantic similarity against claim_text.
-5. Cluster near-duplicates by embedding distance.
-6. Return independent cluster list + evidence units.
-
-PLACEHOLDERS in this file
---------------------------
-  - Search backend credentials (see config/settings.py)
-  - Paraphrase model: uses simple heuristic by default;
-    swap _generate_paraphrases() for an LLM call if desired.
-  - Crawl4ai fetch: requires `pip install crawl4ai` and Playwright
+Agent-directed web search and page sampling.
 """
 
 from __future__ import annotations
+
 import asyncio
-import hashlib
 import re
 import uuid
 from datetime import datetime
+from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
-from config.settings import AgentSettings
-from utils.schema    import ClaimInput
-from utils.embeddings import get_embeddings, cosine_similarity
-from utils.logger    import get_logger
+try:
+    from ddgs import DDGS
+except ImportError:
+    DDGS = None
+
+try:
+    from ..config.settings import AgentSettings
+except ImportError:
+    from config.settings import AgentSettings
+
+try:
+    from CredenceAI.backend.app.models.schema import ScraperInput as ClaimInput
+except ImportError:
+    try:
+        from ...app.models.schema import ScraperInput as ClaimInput
+    except ImportError:
+        from app.models.schema import ScraperInput as ClaimInput
+
+try:
+    from CredenceAI.backend.utils.embeddings import cosine_similarity, get_embeddings
+except ImportError:
+    try:
+        from ...utils.embeddings import cosine_similarity, get_embeddings
+    except ImportError:
+        from utils.embeddings import cosine_similarity, get_embeddings
+
+try:
+    from CredenceAI.backend.utils.log import get_logger
+except ImportError:
+    try:
+        from ...utils.log import get_logger
+    except ImportError:
+        from utils.log import get_logger
 
 logger = get_logger(__name__)
 
@@ -40,308 +55,208 @@ async def run_multi_search(
     claim: ClaimInput,
     settings: AgentSettings,
     retry: int = 0,
-) -> dict:
-    """
-    Returns:
-        {
-          "evidence_units": [...],
-          "searches_performed": int,
-          "independent_clusters": int,
-          "propagation_velocity": float,
-        }
-    """
-    queries = _generate_paraphrases(claim.claim_text, n=settings.max_searches, retry=retry)
+    plan: Any | None = None,
+) -> dict[str, Any]:
+    queries = _resolve_queries(claim, settings, retry=retry, plan=plan)
     logger.info("MultiSearch: generated %d queries for claim_id=%s", len(queries), claim.claim_id)
 
-    # Run searches
-    search_results: list[dict] = []
-    for q in queries:
-        hits = await _search(q, settings)
-        search_results.extend(hits)
+    results: list[dict[str, Any]] = []
+    for query in queries:
+        results.extend(await _search(query))
 
-    # Deduplicate by URL
-    seen_urls: set[str] = {u.url for u in claim.initial_urls}
-    unique_results = []
-    for r in search_results:
-        if r["url"] not in seen_urls:
-            seen_urls.add(r["url"])
-            unique_results.append(r)
+    seen_urls = {str(item.url) for item in claim.initial_urls}
+    deduped_results: list[dict[str, Any]] = []
+    for item in results:
+        url = item.get("url", "")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped_results.append(item)
 
-    # Fetch page content
-    fetched = await _fetch_pages(unique_results[:20], settings)  # cap at 20 pages
-
-    # Compute similarities
-    if fetched:
-        snippets  = [p["text"][:1000] for p in fetched]
-        all_texts = [claim.claim_text] + snippets
-        try:
-            embeddings = get_embeddings(all_texts, settings)
-            claim_vec  = embeddings[0]
-            page_vecs  = embeddings[1:]
-        except Exception as exc:
-            logger.warning("Embedding failed: %s; using token overlap", exc)
-            claim_vec = None
-            page_vecs = [None] * len(fetched)
-    else:
-        fetched, claim_vec, page_vecs = [], None, []
-
-    # Build raw evidence units
-    raw_units = []
-    for i, page in enumerate(fetched):
-        vec = page_vecs[i] if i < len(page_vecs) else None
-        if claim_vec is not None and vec is not None:
-            sim = cosine_similarity(claim_vec, vec)
-        else:
-            sim = _token_overlap(claim.claim_text, page["text"])
-
-        lr = _sim_to_lr(sim, settings)
-        raw_units.append({
-            "id":                 str(uuid.uuid4()),
-            "type":               "support" if sim > 0.5 else "noise",
-            "domain":             page.get("domain", ""),
-            "url":                page["url"],
-            "timestamp":          page.get("published_at"),
-            "similarity":         round(sim, 4),
-            "lr":                 lr,
-            "independence_weight": 1.0,
-            "cluster_id":         None,
-            "provenance":         "multi_search",
-            "raw_snippet":        page["text"][:500],
-        })
-
-    # Cluster near-duplicates
-    units_with_clusters = _cluster_units(raw_units, claim_vec, fetched, settings)
-
-    # Propagation velocity: how many sources published within 6h of claim timestamp
-    velocity = _estimate_velocity(units_with_clusters, claim.timestamp)
-
-    independent_clusters = len({u["cluster_id"] for u in units_with_clusters if u["cluster_id"]})
+    fetched = await _fetch_pages(deduped_results[:20])
+    units = _score_pages(claim, fetched, settings)
+    velocity = _estimate_velocity(units, claim.timestamp)
 
     return {
-        "evidence_units":      units_with_clusters,
-        "searches_performed":  len(queries),
-        "independent_clusters": independent_clusters,
+        "evidence_units": units,
+        "searches_performed": len(queries),
+        "independent_clusters": len({u["cluster_id"] for u in units if u.get("cluster_id")}),
         "propagation_velocity": velocity,
     }
 
 
-# ── Query generation ──────────────────────────────────────────────────────────
-
-def _generate_paraphrases(claim_text: str, n: int = 6, retry: int = 0) -> list[str]:
-    """
-    Simple heuristic paraphraser. For production, replace this with an LLM
-    call (e.g. OpenAI chat completion asking for N paraphrases).  # ← PLACEHOLDER
-    """
-    base = claim_text.strip()
-    queries = [base]
-
-    # Entity extraction heuristic: capitalised words
-    entities = re.findall(r'\b[A-Z][a-zA-Z]{2,}\b', base)
-    if entities:
-        queries.append(" ".join(entities[:4]))
-
-    # Remove filler words
-    stopwords = {"the","a","an","is","are","was","were","has","have","that","this","in","of","to","and"}
-    tokens = [t for t in base.lower().split() if t not in stopwords]
-    queries.append(" ".join(tokens[:8]))
-
-    # Key noun phrases (very rough)
-    queries.append(base[:60] + " verified")
-    queries.append(base[:60] + " fact check")
-
-    if retry > 0:
-        # Expand with negation check and date window
-        queries.append(f"{base[:50]} debunked OR confirmed")
-        queries.append(f"{base[:50]} latest news")
-
-    return list(dict.fromkeys(queries))[:n]  # dedup, cap at n
+def _resolve_queries(claim: ClaimInput, settings: AgentSettings, retry: int = 0, plan: Any | None = None) -> list[str]:
+    if plan is not None:
+        search_plan = getattr(plan, "search", None)
+        if retry > 0 and getattr(search_plan, "retry", None):
+            return list(search_plan.retry)[: settings.max_searches]
+        if getattr(search_plan, "primary", None):
+            return list(search_plan.primary)[: settings.max_searches]
+    return _generate_queries(claim.claim_text, claim.entities, settings.max_searches, retry)
 
 
-# ── Search backends ───────────────────────────────────────────────────────────
-
-async def _search(query: str, settings: AgentSettings) -> list[dict]:
-    backend = settings.search_backend
-    try:
-        if backend == "duckduckgo":
-            return await _ddg_search(query)
-        elif backend == "serper":
-            return await _serper_search(query, settings.serper_api_key)
-        else:
-            logger.warning("Unknown search backend %r; falling back to DuckDuckGo", backend)
-            return await _ddg_search(query)
-    except Exception as exc:
-        logger.warning("Search failed for query %r: %s", query, exc)
-        return []
-
-
-async def _ddg_search(query: str) -> list[dict]:
-    """DuckDuckGo search via duckduckgo_search library."""
-    try:
-        from duckduckgo_search import DDGS       # pip install duckduckgo-search
-        results = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=10):
-                results.append({
-                    "url":    r.get("href", ""),
-                    "domain": urlparse(r.get("href", "")).netloc,
-                    "title":  r.get("title", ""),
-                    "snippet": r.get("body", ""),
-                })
-        return results
-    except ImportError:
-        logger.warning("duckduckgo-search not installed; returning empty results")
-        return []
-
-
-async def _serper_search(query: str, api_key: str) -> list[dict]:
-    """Serper.dev Google search proxy.  # ← PLACEHOLDER: requires SERPER_API_KEY"""
-    import httpx
-    if api_key.startswith("YOUR_"):
-        logger.warning("Serper API key not set")
-        return []
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": 10},
-        )
-        data = resp.json()
-    return [
-        {
-            "url":    r.get("link", ""),
-            "domain": urlparse(r.get("link", "")).netloc,
-            "title":  r.get("title", ""),
-            "snippet": r.get("snippet", ""),
-        }
-        for r in data.get("organic", [])
+def _generate_queries(claim_text: str, entities: list[str], limit: int, retry: int) -> list[str]:
+    entity_phrase = " ".join(entities[:4]).strip()
+    clean = claim_text.strip()
+    queries = [
+        clean,
+        entity_phrase,
+        f"{clean[:80]} fact check",
+        f"{clean[:80]} official statement",
+        f"{clean[:80]} latest",
     ]
+    if retry > 0:
+        queries.extend([
+            f"{clean[:80]} denied OR confirmed",
+            f"{clean[:80]} rebuttal",
+        ])
+    return [q for q in dict.fromkeys(query.strip() for query in queries) if q][:limit]
 
 
-# ── Page fetching ─────────────────────────────────────────────────────────────
+async def _search(query: str) -> list[dict[str, Any]]:
+    if DDGS is None:
+        logger.warning("ddgs not installed; returning empty results")
+        return []
 
-async def _fetch_pages(results: list[dict], settings: AgentSettings) -> list[dict]:
-    tasks = [_fetch_one(r, settings) for r in results]
-    fetched = await asyncio.gather(*tasks, return_exceptions=True)
-    return [f for f in fetched if isinstance(f, dict) and f.get("text")]
+    def _run() -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        with DDGS() as ddgs:
+            for result in ddgs.text(query, max_results=8):
+                href = result.get("href") or result.get("url") or result.get("link") or ""
+                if not href:
+                    continue
+                items.append(
+                    {
+                        "url": href,
+                        "domain": (urlparse(href).hostname or "").removeprefix("www."),
+                        "title": result.get("title", ""),
+                        "snippet": result.get("body") or result.get("snippet") or "",
+                    }
+                )
+        return items
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_run), timeout=15)
+    except asyncio.TimeoutError:
+        logger.warning("DDG search timed out for query: %s", query)
+        return []
+    except Exception as exc:
+        logger.warning("DDG search failed for query '%s': %s", query, exc)
+        return []
 
 
-async def _fetch_one(result: dict, settings: AgentSettings) -> dict | None:
+async def _fetch_pages(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fetched = await asyncio.gather(*[_fetch_one(result) for result in results], return_exceptions=True)
+    return [item for item in fetched if isinstance(item, dict) and item.get("text")]
+
+
+async def _fetch_one(result: dict[str, Any]) -> dict[str, Any] | None:
     url = result.get("url", "")
     if not url:
         return None
 
-    # Try crawl4ai first
-    try:
-        from crawl4ai import AsyncWebCrawler          # pip install crawl4ai
-        async with AsyncWebCrawler(headless=settings.crawl4ai_headless) as crawler:
-            r = await crawler.arun(url=url, bypass_cache=True,
-                                   timeout=settings.crawl4ai_timeout)
-            text = r.markdown or r.cleaned_html or ""
-            return {**result, "text": text[:3000], "published_at": None}
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.debug("crawl4ai failed for %s: %s", url, exc)
+    def _download() -> dict[str, Any] | None:
+        try:
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urlopen(request, timeout=10) as response:
+                html = response.read().decode("utf-8", errors="ignore")
+            text = re.sub(r"<[^>]+>", " ", html)
+            text = re.sub(r"\s+", " ", text).strip()
+            return {
+                "url": url,
+                "domain": result.get("domain") or (urlparse(url).hostname or "").removeprefix("www."),
+                "published_at": None,
+                "text": text,
+            }
+        except Exception as exc:
+            logger.debug("Fetch failed for %s: %s", url, exc)
+            return None
 
-    # Fallback: plain httpx GET
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            text = resp.text[:3000]
-            return {**result, "text": text, "published_at": None}
-    except Exception as exc:
-        logger.debug("httpx fetch failed for %s: %s", url, exc)
-        # Fall back to snippet only
-        return {**result, "text": result.get("snippet", ""), "published_at": None}
+    return await asyncio.to_thread(_download)
 
 
-# ── Clustering ────────────────────────────────────────────────────────────────
+def _score_pages(claim: ClaimInput, pages: list[dict[str, Any]], settings: AgentSettings) -> list[dict[str, Any]]:
+    if not pages:
+        return []
 
-def _cluster_units(
-    units: list[dict],
-    claim_vec,
-    fetched: list[dict],
-    settings: AgentSettings,
-    sim_threshold: float = 0.92,
-) -> list[dict]:
-    """
-    Assign cluster_ids by grouping units whose snippets are very similar
-    (syndicated / copy-paste content). Units in the same cluster count as
-    ONE independent evidence source.
-    """
-    if len(units) <= 1:
-        for u in units:
-            u["cluster_id"] = u["domain"] or str(uuid.uuid4())
-        return units
+    snippets = [page["text"][:1000] for page in pages]
+    vectors = get_embeddings([claim.claim_text] + snippets, settings)
+    claim_vec = vectors[0]
+    page_vecs = vectors[1:]
 
-    cluster_map: dict[int, str] = {}
-    for i, unit_i in enumerate(units):
-        if i in cluster_map:
-            continue
-        cid = f"cluster_{hashlib.md5(unit_i['url'].encode()).hexdigest()[:8]}"
-        cluster_map[i] = cid
-        for j, unit_j in enumerate(units):
-            if j <= i or j in cluster_map:
-                continue
-            if _snippet_overlap(unit_i["raw_snippet"], unit_j["raw_snippet"]) > sim_threshold:
-                cluster_map[j] = cid  # same cluster = same source
+    units: list[dict[str, Any]] = []
+    best_by_cluster: dict[str, dict[str, Any]] = {}
 
-    for i, unit in enumerate(units):
-        unit["cluster_id"] = cluster_map.get(i, f"cluster_{i}")
-        # Reduce independence weight for syndicated clusters
-        cluster_size = sum(1 for v in cluster_map.values() if v == unit["cluster_id"])
-        if cluster_size > 1:
-            unit["independence_weight"] = round(1.0 / cluster_size, 3)
+    for index, page in enumerate(pages):
+        similarity = cosine_similarity(claim_vec, page_vecs[index]) if page_vecs else _token_overlap(claim.claim_text, page["text"])
+        lr = _sim_to_lr(similarity, settings)
+        unit = {
+            "id": str(uuid.uuid4()),
+            "type": "support" if similarity > 0.55 else "neutral",
+            "domain": page.get("domain", ""),
+            "url": page.get("url", ""),
+            "timestamp": page.get("published_at"),
+            "similarity": round(similarity, 4),
+            "lr": lr,
+            "independence_weight": 1.0,
+            "cluster_id": page.get("domain") or page.get("url"),
+            "provenance": "multi_search",
+            "raw_snippet": page["text"][:500],
+        }
+        cluster_id = unit["cluster_id"]
+        current = best_by_cluster.get(cluster_id)
+        if current is None or abs(float(unit["lr"]) - 1.0) > abs(float(current["lr"]) - 1.0):
+            best_by_cluster[cluster_id] = unit
 
+    units = list(best_by_cluster.values())
+    units.sort(key=lambda item: item["similarity"], reverse=True)
     return units
 
 
-def _snippet_overlap(a: str, b: str) -> float:
-    """Jaccard overlap on 4-grams as a cheap syndication detector."""
-    def ngrams(text, n=4):
-        tokens = text.lower().split()
-        return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
-    ng_a, ng_b = ngrams(a), ngrams(b)
-    if not ng_a or not ng_b:
+def _estimate_velocity(units: list[dict[str, Any]], claim_timestamp: Any) -> float:
+    if not units or not claim_timestamp:
         return 0.0
-    return len(ng_a & ng_b) / len(ng_a | ng_b)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sim_to_lr(sim: float, settings: AgentSettings) -> float:
-    m = settings.lr_mapping
-    if sim >= 0.85:
-        return m["high"]
-    elif sim >= 0.65:
-        return m["medium"]
-    elif sim >= 0.40:
-        return m["low"]
-    return m["noise"]
-
-
-def _token_overlap(a: str, b: str) -> float:
-    ta = set(a.lower().split())
-    tb = set(b.lower().split())
-    if not ta or not tb:
+    try:
+        claim_dt = _parse_datetime(claim_timestamp)
+    except Exception:
         return 0.0
-    return len(ta & tb) / len(ta | tb)
+
+    close = 0
+    dated = 0
+    for unit in units:
+        timestamp = unit.get("timestamp")
+        if not timestamp:
+            continue
+        try:
+            unit_dt = _parse_datetime(timestamp)
+        except Exception:
+            continue
+        dated += 1
+        if abs((unit_dt - claim_dt).total_seconds()) <= 6 * 3600:
+            close += 1
+    return round(close / dated, 4) if dated else 0.0
 
 
-def _estimate_velocity(units: list[dict], claim_ts: datetime) -> float:
-    """
-    Fraction of supporting units that appeared within 6 h of claim timestamp.
-    High velocity + low independence = coordinated amplification signal.
-    """
-    supporting = [u for u in units if u["type"] == "support"]
-    if not supporting:
+def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _token_overlap(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"\w+", left.lower()))
+    right_tokens = set(re.findall(r"\w+", right.lower()))
+    if not left_tokens or not right_tokens:
         return 0.0
-    within_6h = 0
-    for u in supporting:
-        ts = u.get("timestamp")
-        if ts and isinstance(ts, datetime):
-            delta_h = abs((ts - claim_ts).total_seconds()) / 3600
-            if delta_h <= 6:
-                within_6h += 1
-    return round(within_6h / len(supporting), 3)
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _sim_to_lr(similarity: float, settings: AgentSettings) -> float:
+    mapping = settings.lr_mapping
+    if similarity >= 0.85:
+        return float(mapping.get("high", 3.0))
+    if similarity >= 0.65:
+        return float(mapping.get("medium", 1.8))
+    if similarity >= 0.40:
+        return float(mapping.get("low", 1.1))
+    return float(mapping.get("noise", 0.9))

@@ -19,10 +19,12 @@ from typing import Any, Callable
 
 try:
     from .config.settings import AgentSettings
+    from .agentic import build_initial_plan, build_retry_plan, review_pipeline_results
     from .scoring.aggregator import aggregate_evidence
     from .scoring.classifier import classify_score
 except ImportError:
     from config.settings import AgentSettings
+    from agentic import build_initial_plan, build_retry_plan, review_pipeline_results
     from scoring.aggregator import aggregate_evidence
     from scoring.classifier import classify_score
 
@@ -129,20 +131,6 @@ def build_output(
     return output
 
 
-from typing import Any
-
-from backend.agent.pipelines.multi_search     import run_multi_search
-from backend.agent.pipelines.social_sentiment import run_social_sentiment
-from backend.agent.pipelines.model_validation  import run_model_validation
-from backend.agent.pipelines.source_behavior   import run_source_behavior
-from backend.agent.scoring.aggregator          import aggregate_evidence
-from backend.agent.scoring.classifier          import classify_score
-from backend.agent.config.settings             import AgentSettings
-from backend.agent.utils.logger                import get_logger
-from backend.agent.utils.schema                import ClaimInput, AgentOutput, build_output
-
-logger = get_logger(__name__)
-
 async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None) -> dict[str, Any]:
     """
     Orchestrate all four pipelines in parallel, aggregate, classify, return verdict.
@@ -170,6 +158,8 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
 
     plan_trace.append({"step": "input_validated", "claim_id": claim_input.claim_id})
     logger.info("Starting verification for claim_id=%s", claim_input.claim_id)
+    agent_plan = build_initial_plan(claim_input, settings)
+    plan_trace.append({"step": "agent_plan_created", "intent": agent_plan.intent, "risk_flags": agent_plan.risk_flags})
 
     # ── Fan out four pipelines concurrently ─────────────────────────────────
     plan_trace.append({"step": "pipelines_start", "pipelines": [
@@ -182,9 +172,9 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
         model_result,
         source_result,
     ) = await asyncio.gather(
-        run_multi_search(claim_input, settings),
+        run_multi_search(claim_input, settings, plan=agent_plan),
         run_social_sentiment(claim_input, settings),
-        run_model_validation(claim_input, settings),
+        run_model_validation(claim_input, settings, plan=agent_plan),
         run_source_behavior(claim_input, settings),
         return_exceptions=True,
     )
@@ -215,13 +205,27 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
         and (independent_clusters < 2 or ci_width_estimate > 0.4)
         and (time.monotonic() - t0) * 1000 < settings.max_elapsed_ms * 0.8
     ):
+        review = review_pipeline_results(
+            plan=agent_plan,
+            pipeline_results=pipeline_results,
+            independent_clusters=independent_clusters,
+            ci_width_estimate=ci_width_estimate,
+            retries=retries,
+            settings=settings,
+        )
+        plan_trace.append({"step": "agent_review", **review.to_meta()})
+        if not review.should_retry:
+            break
+
         retries += 1
+        agent_plan = build_retry_plan(agent_plan, review)
         plan_trace.append({"step": "re_search", "retry": retries,
-                           "reason": f"clusters={independent_clusters}, ci_width≈{ci_width_estimate:.2f}"})
+                           "reason": f"clusters={independent_clusters}, ci_width≈{ci_width_estimate:.2f}",
+                           "focus": review.focus})
         logger.info("Re-search triggered (retry %d)", retries)
 
         try:
-            expanded = await run_multi_search(claim_input, settings, retry=retries)
+            expanded = await run_multi_search(claim_input, settings, retry=retries, plan=agent_plan)
         except Exception as exc:
             logger.warning("Retry multi_search failed: %s", exc)
             plan_trace.append({"step": "pipeline_error", "pipeline": "multi_search_retry", "error": str(exc)})
@@ -273,6 +277,7 @@ async def run_agent(claim: dict[str, Any], settings: AgentSettings | None = None
             "retries": retries,
             "elapsed_ms": elapsed_ms,
             "plan_trace": plan_trace,
+            "agent_plan": agent_plan.to_meta(),
             "zero_trust_mode": True,
         },
     )

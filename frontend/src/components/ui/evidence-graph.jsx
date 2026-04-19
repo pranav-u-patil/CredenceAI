@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -10,6 +10,12 @@ import "reactflow/dist/style.css";
 import { AnimatePresence, motion } from "framer-motion";
 import { Maximize2, Minimize2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+
+const NODE_TYPES = {
+  claim: ClaimNode,
+  evidence: EvidenceNode,
+  entity: EntityNode,
+};
 
 /* ─────────────────────────────────────────────────────
  *  Custom Node Components
@@ -223,12 +229,6 @@ import { createPortal } from "react-dom";
  *  Shared graph canvas
  * ─────────────────────────────────────────────────── */
 function GraphCanvas({ nodes, edges, padding = 0.12, interactive = true }) {
-  const nodeTypes = useMemo(() => ({
-    claim:    ClaimNode,
-    evidence: EvidenceNode,
-    entity:   EntityNode,
-  }), []);
-
   const onInit = useCallback((instance) => {
     setTimeout(() => instance.fitView({ padding }), 120);
   }, [padding]);
@@ -237,7 +237,7 @@ function GraphCanvas({ nodes, edges, padding = 0.12, interactive = true }) {
     <ReactFlow
       nodes={nodes}
       edges={edges}
-      nodeTypes={nodeTypes}
+      nodeTypes={NODE_TYPES}
       onInit={onInit}
       fitView
       fitViewOptions={{ padding }}
