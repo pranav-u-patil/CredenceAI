@@ -1,146 +1,137 @@
-# main.py (place next to run.py)
-import asyncio
-import logging
-from datetime import datetime, timezone
-from importlib import import_module
-from typing import Any, Dict, List, Optional
+"""
+News Intelligence Platform - Main Backend Server
+FastAPI server with Gemini orchestration, crawl4ai scraping,
+sentiment analysis, risk engine, and multi-source intelligence.
+"""
 
+import asyncio
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Any, AsyncGenerator, Optional
+
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-import importlib
-from pydantic import BaseModel, Field, HttpUrl
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
-from app.models.schema import ScraperInput  # your Pydantic models
-from services.scrap import build_claim_from_preview, scrape_article_preview
+from agents.orchestrator import GeminiOrchestrator
+from agents.scraper import NewsScraperAgent
+from agents.sentiment import SentimentAnalyzer
+from agents.risk_engine import RiskEngine
+from agents.source_analyzer import SourceBehaviorAnalyzer
+from agents.fact_checker import FactCheckerAgent
+from config.settings import Settings
 
-app = FastAPI(title="CredenceAI")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="News Intelligence Platform",
+    description="AI-powered news analysis with Gemini orchestration",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+settings = Settings()
 
-class ArticleRequest(BaseModel):
-    url: HttpUrl
-    claim_text: Optional[str] = Field(default=None, description="Optional custom claim text for deeper analysis")
-    entities: Optional[List[str]] = Field(default_factory=list)
-    context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+# ─── Request Models ─────────────────────────────────────────────────────────
+
+class AnalysisRequest(BaseModel):
+    queries: list[str]
+    sources: Optional[list[str]] = None
+    depth: Optional[str] = "standard"  # standard | deep | quick
+    gemini_api_key: str
+    finnhub_api_key: Optional[str] = ""
+    news_api_key: Optional[str] = ""
+    fact_check_api_key: Optional[str] = ""
+
+class QuickAnalysisRequest(BaseModel):
+    query: str
+    gemini_api_key: str
+    finnhub_api_key: Optional[str] = ""
+    news_api_key: Optional[str] = ""
+
+# ─── Routes ─────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health_check():
+    return {"status": "operational", "timestamp": datetime.utcnow().isoformat()}
 
 
-def _load_run_agent():
-    try:
-        module = import_module("agent.agent")
-    except ModuleNotFoundError:
-        module = import_module("CredenceAI.backend.agent.agent")
-    return getattr(module, "run_agent")
-
-@app.on_event("startup")
-async def startup():
-    # Create queue and start optional worker if available.
-    app.state.agent_queue = asyncio.Queue(maxsize=1000)
-    app.state.agent_task = None
-    try:
-        agent = importlib.import_module("agent.worker")
-        app.state.agent_task = asyncio.create_task(
-            agent.start_agent(asyncio.get_event_loop(), app.state.agent_queue)
-        )
-    except ModuleNotFoundError:
-        logger.warning("Optional module 'agent.worker' not found; running without background worker")
-
-@app.on_event("shutdown")
-async def shutdown():
-    try:
-        agent = importlib.import_module("agent.worker")
-        stop = getattr(agent, "stop_agent", None)
-        if stop:
-            maybe = stop()
-            if asyncio.iscoroutine(maybe):
-                await maybe
-    except ModuleNotFoundError:
-        pass
-
-    if getattr(app.state, "agent_task", None):
-        app.state.agent_task.cancel()
+@app.post("/analyze/stream")
+async def analyze_stream(request: AnalysisRequest):
+    """
+    Full pipeline: scrape → source analysis → sentiment → risk → Gemini synthesis
+    Streams progress events back to client (SSE).
+    Free-tier friendly: batched requests, rate-limited, caches where possible.
+    """
+    async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            await app.state.agent_task
-        except asyncio.CancelledError:
-            pass
+            orchestrator = GeminiOrchestrator(
+                gemini_api_key=request.gemini_api_key,
+                finnhub_api_key=request.finnhub_api_key,
+                news_api_key=request.news_api_key,
+                fact_check_api_key=request.fact_check_api_key,
+            )
 
-@app.post("/ingest/scraper", status_code=202)
-async def ingest(payload: ScraperInput, request: Request):
-    q = request.app.state.agent_queue
-    await q.put(payload.dict())
-    return {"status":"accepted", "claim_id": payload.claim_id}
+            async for event in orchestrator.run_full_pipeline(
+                queries=request.queries,
+                sources=request.sources,
+                depth=request.depth,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+                await asyncio.sleep(0.01)
 
+        except Exception as e:
+            logger.exception("Pipeline error")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-@app.post("/preview/article")
-async def preview_article(payload: ArticleRequest):
-    preview = await scrape_article_preview(str(payload.url))
-    if preview.get("status") != "success":
-        raise HTTPException(status_code=422, detail=preview.get("error") or "Unable to scrape article")
-
-    return {
-        "status": "preview_ready",
-        "preview": preview,
-        "claim_text": payload.claim_text or preview.get("title") or preview.get("summary") or preview.get("snippet") or str(payload.url),
-    }
-
-
-@app.post("/analyze/article")
-async def analyze_article(payload: ArticleRequest):
-    preview = await scrape_article_preview(str(payload.url))
-    if preview.get("status") != "success":
-        raise HTTPException(status_code=422, detail=preview.get("error") or "Unable to scrape article")
-
-    claim_id = f"claim_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
-    claim_payload = build_claim_from_preview(
-        url=str(payload.url),
-        preview=preview,
-        claim_id=claim_id,
-        claim_text=payload.claim_text,
-        entities=payload.entities,
-        context=payload.context,
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
     )
 
-    run_agent = _load_run_agent()
-    analysis = await run_agent(claim_payload)
 
-    return {
-        "status": "analysis_complete",
-        "preview": preview,
-        "analysis": analysis,
-    }
+@app.post("/analyze/quick")
+async def quick_analyze(request: QuickAnalysisRequest):
+    """
+    Lightweight single-query analysis. Conserves API tokens for free-tier users.
+    """
+    try:
+        orchestrator = GeminiOrchestrator(
+            gemini_api_key=request.gemini_api_key,
+            finnhub_api_key=request.finnhub_api_key,
+            news_api_key=request.news_api_key,
+        )
+        result = await orchestrator.quick_analyze(request.query)
+        return result
+    except Exception as e:
+        logger.exception("Quick analysis error")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/analyze/claim")
-async def analyze_claim(payload: ScraperInput):
-    """Run the full agent pipeline on a plain-text claim (no URL needed)."""
-    claim_id = payload.claim_id or f"claim_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+@app.get("/sources/behavior/{domain}")
+async def source_behavior(domain: str):
+    """Return cached behavior profile for a news source domain."""
+    analyzer = SourceBehaviorAnalyzer()
+    profile = await analyzer.get_profile(domain)
+    return profile
 
-    claim_payload = {
-        "claim_id": claim_id,
-        "claim_text": payload.claim_text,
-        "timestamp": payload.timestamp.isoformat() if payload.timestamp else datetime.now(timezone.utc).isoformat(),
-        "initial_urls": [u.dict() for u in payload.initial_urls] if payload.initial_urls else [],
-        "entities": payload.entities or [],
-        "context": payload.context or {},
-        "source_meta": payload.source_meta or {},
-    }
 
-    run_agent = _load_run_agent()
-    analysis = await run_agent(claim_payload)
-
-    return {
-        "status": "analysis_complete",
-        "claim_id": claim_id,
-        "claim_text": payload.claim_text,
-        "analysis": analysis,
-    }
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

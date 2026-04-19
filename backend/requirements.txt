@@ -1,0 +1,19 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+httpx==0.28.1
+pydantic==2.10.3
+python-dotenv==1.0.1
+
+# Gemini
+google-generativeai==0.8.3
+
+# Scraping
+crawl4ai==0.4.247
+playwright==1.49.0
+
+# NLP / Sentiment
+vaderSentiment==3.3.2
+textblob==0.18.0
+
+# Utilities
+python-multipart==0.0.20
