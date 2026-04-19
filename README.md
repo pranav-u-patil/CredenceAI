@@ -35,26 +35,16 @@ CredenceAi/
 The system is carefully designed to stay within free limits:
 
 ### Gemini Flash (gemini-1.5-flash)
-- **Model choice**: Flash is ~20× cheaper than Pro, still excellent for synthesis
-- **Rate limiter**: Built-in 4.5s cooldown between calls (stays under 15 RPM)
-- **Max tokens**: 2048 per response — concise, bullet-pointed outputs
-- **Call count per analysis**: Exactly 2 Gemini calls (planning + synthesis)
-- **Context pruning**: Only top 8 articles sent to Gemini, truncated to 150 chars each
+
 
 ### NewsAPI (100 req/day)
-- Max 5 articles per query
-- Query cap: 3 queries maximum
-- 15-minute response cache (prevents duplicate calls on re-runs)
+
 
 ### Finnhub (60 req/min)
-- Only called if ticker symbol detected in queries
-- 5-minute cache on market data
-- Maximum 2 calls per analysis session
+
 
 ### crawl4ai
-- **Zero API cost** — local browser-based scraper
-- Only enriches top 2 articles per run (saves time + resources)
-- 15-minute response cache enabled
+
 
 ---
 
