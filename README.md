@@ -9,8 +9,6 @@ The repository includes:
 
 ## System Architecture
 
-Upload your two architecture images and place them in a folder such as docs/images, then update the paths below if needed.
-
 ### Architecture Diagram 1
 
 ![System Architecture](..\CredenceAI\docs\images\System_Architechture1.png)
